@@ -15,3 +15,8 @@ keys/
 *.b64
 *.secret
 *keystore-password*
+
+__pycache__/
+*.py[cod]
+.env
+.env.*
