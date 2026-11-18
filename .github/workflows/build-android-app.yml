@@ -149,6 +149,18 @@ jobs:
         with:
           targets: aarch64-linux-android
 
+      - name: Run GridCraft Hebrew and RTL regression tests
+        if: inputs.app == 'gridcraft'
+        working-directory: builder/source/gridcraft
+        run: |
+          set -Eeuo pipefail
+          cargo fmt --all -- --check
+          cargo test -p gridcraft-engine --test it a_pathless_imported_workbook_does_not_follow_interface_direction
+          cargo test -p gridcraft-engine --test it direction_sync_waits_for_an_open_undo_group_and_stays_clean_after_rollback
+          cargo test -p gridcraft-ui-egui --lib only_right_to_left_languages_mirror_the_tab_row
+          mkdir -p "$GITHUB_WORKSPACE/logs"
+          cargo xtask i18n-report 2>&1 | tee "$GITHUB_WORKSPACE/logs/gridcraft-hebrew-i18n-report.txt"
+
       - name: Set up sccache
         uses: mozilla-actions/sccache-action@v0.0.11
         with:
