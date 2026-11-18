@@ -168,7 +168,8 @@ jobs:
           cargo fmt --all
           cargo test -p gridcraft-engine --test it a_pathless_imported_workbook_does_not_follow_interface_direction
           cargo test -p gridcraft-engine --test it direction_sync_waits_for_an_open_undo_group_and_stays_clean_after_rollback
-          cargo test -p gridcraft-ui-egui --lib only_right_to_left_languages_mirror_the_tab_row
+          cargo test -p gridcraft-ui-egui --test it right_to_left::column_a_is_drawn_on_the_right_and_clicks_hit_the_mirrored_cells
+          cargo test -p gridcraft-ui-egui --test it right_to_left::left_and_right_arrows_follow_the_screen
           mkdir -p "$GITHUB_WORKSPACE/logs"
           cargo xtask i18n-report 2>&1 | tee "$GITHUB_WORKSPACE/logs/gridcraft-hebrew-i18n-report.txt"
 
@@ -310,7 +311,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.profile.outputs.app }}-${{ inputs.build_mode }}-apk-backup
-          path: ${{ steps.verify.outputs.apk_path }}
+          path: |
+            ${{ steps.verify.outputs.apk_path }}
+            logs/gridcraft-hebrew-i18n-report.txt
           if-no-files-found: error
           retention-days: 14
 
