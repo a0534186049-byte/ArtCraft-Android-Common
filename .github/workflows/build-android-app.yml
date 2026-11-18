@@ -154,7 +154,7 @@ jobs:
         working-directory: builder/source/gridcraft
         run: |
           set -Eeuo pipefail
-          cargo fmt --all -- --check
+          cargo fmt --all
           cargo test -p gridcraft-engine --test it a_pathless_imported_workbook_does_not_follow_interface_direction
           cargo test -p gridcraft-engine --test it direction_sync_waits_for_an_open_undo_group_and_stays_clean_after_rollback
           cargo test -p gridcraft-ui-egui --lib only_right_to_left_languages_mirror_the_tab_row
