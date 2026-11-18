@@ -161,6 +161,8 @@ jobs:
       - name: Run GridCraft Hebrew and RTL regression tests
         if: inputs.app == 'gridcraft'
         working-directory: builder/source/gridcraft
+        env:
+          RUSTC_WRAPPER: ""
         run: |
           set -Eeuo pipefail
           cargo fmt --all
