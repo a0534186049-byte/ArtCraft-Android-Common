@@ -1,0 +1,74 @@
+name: Validate shared Android infrastructure
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate profiles, scripts and workflow syntax
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out Common
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install YAML parser
+        run: python -m pip install --disable-pip-version-check pyyaml
+
+      - name: Validate JSON app profiles
+        run: |
+          set -Eeuo pipefail
+          python -m json.tool apps/gridcraft.json >/dev/null
+          python -m json.tool apps/photocraft.json >/dev/null
+          python3 scripts/load-app-profile.py gridcraft >/tmp/gridcraft-profile.json
+          python3 scripts/load-app-profile.py photocraft >/tmp/photocraft-profile.json
+
+      - name: Validate Python and shell scripts
+        run: |
+          set -Eeuo pipefail
+          python3 -m py_compile scripts/load-app-profile.py
+          bash -n scripts/verify-apk.sh
+          bash -n scripts/generate-signing-key.sh
+
+      - name: Validate GitHub Actions YAML and builder pin
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          import yaml
+
+          workflow_path = Path(".github/workflows/build-android-app.yml")
+          workflow = yaml.load(workflow_path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+          if not isinstance(workflow, dict) or "workflow_call" not in workflow.get("on", {}):
+              raise SystemExit("Reusable build workflow must declare on.workflow_call")
+
+          for path in Path(".github/workflows").glob("*.yml"):
+              parsed = yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+              if not isinstance(parsed, dict):
+                  raise SystemExit(f"Invalid workflow YAML structure: {path}")
+
+          pin_file = Path("versions/artcraft-android-builder.ref").read_text(encoding="utf-8").strip()
+          workflow_text = workflow_path.read_text(encoding="utf-8")
+          match = re.search(r"^\s+default:\s+([0-9a-f]{40})\s*$", workflow_text, re.MULTILINE)
+          if not match or match.group(1) != pin_file:
+              raise SystemExit("Builder SHA in the reusable workflow does not match versions/artcraft-android-builder.ref")
+
+          for app in ("gridcraft", "photocraft"):
+              profile = Path(f"apps/{app}.json").read_text(encoding="utf-8")
+              if f'"slug": "{app}"' not in profile:
+                  raise SystemExit(f"Invalid profile slug in apps/{app}.json")
+
+          print("Common repository validation passed.")
+          PY
