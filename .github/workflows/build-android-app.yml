@@ -7,6 +7,10 @@ on:
         description: Central app profile slug (gridcraft or photocraft)
         required: true
         type: string
+      common_ref:
+        description: Full immutable commit SHA of this Common repository used by the caller
+        required: true
+        type: string
       source_version:
         description: Upstream source selector when no pinned source commit is configured
         required: false
@@ -53,7 +57,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: a0534186049-byte/ArtCraft-Android-Common
-          ref: ${{ github.workflow_sha }}
+          ref: ${{ inputs.common_ref }}
           path: common
           persist-credentials: false
 
@@ -61,8 +65,13 @@ jobs:
         id: profile
         env:
           APP: ${{ inputs.app }}
+          COMMON_REF: ${{ inputs.common_ref }}
         run: |
           set -Eeuo pipefail
+          [[ "$COMMON_REF" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::common_ref must be a full 40-character commit SHA."
+            exit 2
+          }
           python3 common/scripts/load-app-profile.py "$APP"
 
       - name: Check out the pinned ArtCraft Android Builder
