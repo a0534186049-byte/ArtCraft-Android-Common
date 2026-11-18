@@ -12,6 +12,8 @@ ALLOWED_APPS = {"gridcraft", "photocraft"}
 PACKAGE_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$")
 TAG_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 ASSET_RE = re.compile(r"^[A-Za-z0-9._-]+\.apk$")
+SOURCE_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 def fail(message: str) -> None:
@@ -50,8 +52,19 @@ def main() -> None:
     if not ASSET_RE.fullmatch(profile["release_asset_name"]):
         fail(f"Invalid APK asset name: {profile['release_asset_name']}")
 
+    source_repo = profile.get("android_source_repository", "")
+    source_commit = profile.get("android_source_commit", "")
+    if source_repo and not SOURCE_REPO_RE.fullmatch(source_repo):
+        fail(f"Invalid Android source repository: {source_repo!r}")
+    if source_commit and not COMMIT_RE.fullmatch(source_commit):
+        fail(f"Invalid Android source commit: {source_commit!r}")
+    if source_commit and not source_repo:
+        fail("android_source_commit requires android_source_repository")
+
     outputs = {
         "app": app,
+        "android_source_repository": source_repo,
+        "android_source_commit": source_commit,
         "display_name": profile["display_name"],
         "application_id": profile["application_id"],
         "release_tag": profile["release_tag"],
