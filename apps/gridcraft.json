@@ -1,0 +1,10 @@
+{
+  "slug": "gridcraft",
+  "display_name": "GridCraft",
+  "description": "Spreadsheet application (Excel-style use case)",
+  "upstream_repository": "https://github.com/storytold/gridcraft",
+  "application_id": "com.artcraft.gridcraft",
+  "release_tag": "gridcraft-latest",
+  "release_asset_name": "GridCraft.apk",
+  "adapter": "generated Android launcher"
+}

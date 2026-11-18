@@ -1,0 +1,262 @@
+name: Reusable ArtCraft Android build and release
+
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: Central app profile slug (gridcraft or photocraft)
+        required: true
+        type: string
+      source_version:
+        description: Upstream source selector
+        required: false
+        default: stable
+        type: string
+      builder_ref:
+        description: Immutable ArtCraft Android Builder git commit or tag
+        required: false
+        default: 2a03bb11c4d08e8ca3a5c96dc9fd942cbe7c29a9
+        type: string
+    secrets:
+      ARTCRAFT_SIGNING_KEYSTORE_BASE64:
+        required: true
+      ARTCRAFT_SIGNING_PASSWORD:
+        required: true
+      ARTCRAFT_EXPECTED_CERT_SHA256:
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: artcraft-${{ inputs.app }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and publish ${{ inputs.app }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      RUSTC_WRAPPER: sccache
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+      CARGO_PROFILE_RELEASE_LTO: "thin"
+      CARGO_PROFILE_RELEASE_DEBUG: "false"
+
+    steps:
+      - name: Check out the shared infrastructure at this workflow's exact revision
+        uses: actions/checkout@v4
+        with:
+          repository: a0534186049-byte/ArtCraft-Android-Common
+          ref: ${{ github.workflow_sha }}
+          path: common
+          persist-credentials: false
+
+      - name: Load and validate the central app profile
+        id: profile
+        env:
+          APP: ${{ inputs.app }}
+        run: |
+          set -Eeuo pipefail
+          python3 common/scripts/load-app-profile.py "$APP"
+
+      - name: Check out the pinned ArtCraft Android Builder
+        uses: actions/checkout@v4
+        with:
+          repository: MostafaXS1/artcraft-android
+          ref: ${{ inputs.builder_ref }}
+          path: builder
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install builder Python dependency
+        run: python -m pip install --upgrade pillow
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Configure Java for the Android builder
+        run: |
+          set -Eeuo pipefail
+          sudo mkdir -p /opt/jdk
+          sudo ln -sfn "$JAVA_HOME" /opt/jdk/temurin-21
+
+      - name: Set up Rust for Android
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: "v0.9.0"
+
+      - name: Cache Rust compiler artifacts
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/sccache
+          key: sccache-${{ runner.os }}-${{ inputs.app }}-${{ inputs.builder_ref }}-${{ github.sha }}
+          restore-keys: |
+            sccache-${{ runner.os }}-${{ inputs.app }}-${{ inputs.builder_ref }}-
+            sccache-${{ runner.os }}-${{ inputs.app }}-
+
+      - name: Cache Cargo and Gradle dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: artcraft-deps-${{ runner.os }}-${{ inputs.app }}-${{ inputs.builder_ref }}
+          restore-keys: |
+            artcraft-deps-${{ runner.os }}-${{ inputs.app }}-
+
+      - name: Install cargo-ndk
+        run: |
+          set -Eeuo pipefail
+          if ! command -v cargo-ndk >/dev/null 2>&1; then
+            mkdir -p "$HOME/.cargo/bin"
+            curl -fsSL https://github.com/bbqsrc/cargo-ndk/releases/download/v4.1.2/cargo-ndk-x86_64-unknown-linux-musl-v4.1.2.tgz |
+              tar -xz --strip-components=1 -C "$HOME/.cargo/bin"
+            chmod +x "$HOME/.cargo/bin/cargo-ndk"*
+          fi
+          cargo ndk -V
+
+      - name: Configure Android SDK and NDK
+        run: |
+          set -Eeuo pipefail
+          [[ -n "$ANDROID_HOME" && -d "$ANDROID_HOME" ]] || { echo "::error::Android SDK is not configured on this runner."; exit 1; }
+          if [[ -d "$ANDROID_HOME/ndk/27.2.12479018" ]]; then
+            NDK="$ANDROID_HOME/ndk/27.2.12479018"
+          else
+            NDK="$(find "$ANDROID_HOME/ndk" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -n 1)"
+          fi
+          [[ -n "$NDK" && -d "$NDK" ]] || { echo "::error::Android NDK was not found."; exit 1; }
+          {
+            echo "ANDROID_NDK_HOME=$NDK"
+            echo "NDK_HOME=$NDK"
+            echo "ARTCRAFT_BUILD_TOOLS_VERSION=35.0.0"
+          } >> "$GITHUB_ENV"
+
+      - name: Restore this app's permanent signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ARTCRAFT_SIGNING_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD_INPUT: ${{ secrets.ARTCRAFT_SIGNING_PASSWORD }}
+        run: |
+          set -Eeuo pipefail
+          [[ -n "$KEYSTORE_B64" && -n "$KEYSTORE_PASSWORD_INPUT" ]] || {
+            echo "::error::The app repository must define its signing-key Secrets."
+            exit 1
+          }
+          PASSWORD="$(printf '%s' "$KEYSTORE_PASSWORD_INPUT" | tr -d '\r\n')"
+          mkdir -p builder/keys
+          chmod 700 builder/keys
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > builder/keys/artcraft-builder.jks
+          printf '%s' "$PASSWORD" > builder/keys/.keystore-password
+          chmod 600 builder/keys/artcraft-builder.jks builder/keys/.keystore-password
+          keytool -list -keystore builder/keys/artcraft-builder.jks -storepass "$PASSWORD" -alias artcraftbuilder >/dev/null
+          echo "Persistent app signing key restored."
+
+      - name: Build the Android APK
+        env:
+          APP: ${{ steps.profile.outputs.app }}
+          DISPLAY_NAME: ${{ steps.profile.outputs.display_name }}
+          APPLICATION_ID: ${{ steps.profile.outputs.application_id }}
+          SOURCE_VERSION: ${{ inputs.source_version }}
+        run: |
+          set -Eeuo pipefail
+          case "$SOURCE_VERSION" in
+            stable) SOURCE_FLAG="-stable" ;;
+            main) SOURCE_FLAG="-main" ;;
+            *) echo "::error::source_version must be 'stable' or 'main'."; exit 2 ;;
+          esac
+          mkdir -p "$GITHUB_WORKSPACE/logs"
+          cd "$GITHUB_WORKSPACE/builder"
+          set -o pipefail
+          bash build.sh "-$APP" "$SOURCE_FLAG" "-appname=$DISPLAY_NAME" "-packagename=$APPLICATION_ID" 2>&1 |
+            tee "$GITHUB_WORKSPACE/logs/$APP-build.log"
+
+      - name: Verify APK package, signature and integrity
+        id: verify
+        env:
+          APP: ${{ steps.profile.outputs.app }}
+          APPLICATION_ID: ${{ steps.profile.outputs.application_id }}
+          ASSET_NAME: ${{ steps.profile.outputs.release_asset_name }}
+          EXPECTED_CERT: ${{ secrets.ARTCRAFT_EXPECTED_CERT_SHA256 }}
+        run: |
+          set -Eeuo pipefail
+          shopt -s nullglob
+          APKS=( "$GITHUB_WORKSPACE"/builder/output/"$APP"-*.apk )
+          if [[ ${#APKS[@]} -ne 1 ]]; then
+            echo "::error::Expected exactly one release APK for $APP; found ${#APKS[@]}."
+            printf '%s\n' "${APKS[@]}"
+            exit 1
+          fi
+          mkdir -p "$GITHUB_WORKSPACE/release"
+          cp -- "${APKS[0]}" "$GITHUB_WORKSPACE/release/$ASSET_NAME"
+          bash common/scripts/verify-apk.sh "$GITHUB_WORKSPACE/release/$ASSET_NAME" "$APPLICATION_ID" "$EXPECTED_CERT"
+          echo "apk_path=$GITHUB_WORKSPACE/release/$ASSET_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK backup Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.profile.outputs.app }}-apk-backup
+          path: ${{ steps.verify.outputs.apk_path }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Create or update the fixed app Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.profile.outputs.release_tag }}
+          DISPLAY_NAME: ${{ steps.profile.outputs.display_name }}
+          ASSET_NAME: ${{ steps.profile.outputs.release_asset_name }}
+        run: |
+          set -Eeuo pipefail
+          ASSET="$GITHUB_WORKSPACE/release/$ASSET_NAME"
+          [[ -s "$ASSET" ]] || { echo "::error::Verified APK asset is missing."; exit 1; }
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$ASSET" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$RELEASE_TAG" "$ASSET" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$DISPLAY_NAME - latest Android APK" \
+              --notes "Latest verified Android APK. Subsequent successful builds replace this asset in the same Release."
+          fi
+
+      - name: Verify that the APK is present in Release Assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.profile.outputs.release_tag }}
+          ASSET_NAME: ${{ steps.profile.outputs.release_asset_name }}
+        run: |
+          set -Eeuo pipefail
+          RESPONSE="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG")"
+          URL="$(printf '%s' "$RESPONSE" | jq -r --arg name "$ASSET_NAME" '.assets[] | select(.name == $name) | .browser_download_url' | head -n 1)"
+          REMOTE_SIZE="$(printf '%s' "$RESPONSE" | jq -r --arg name "$ASSET_NAME" '.assets[] | select(.name == $name) | .size' | head -n 1)"
+          LOCAL_SIZE="$(stat -c%s "$GITHUB_WORKSPACE/release/$ASSET_NAME")"
+          [[ -n "$URL" && "$URL" != "null" ]] || { echo "::error::APK asset not found in Release Assets."; exit 1; }
+          [[ "$REMOTE_SIZE" == "$LOCAL_SIZE" ]] || {
+            echo "::error::Release APK size mismatch (local=$LOCAL_SIZE, remote=$REMOTE_SIZE)."
+            exit 1
+          }
+          echo "Verified published APK asset: $URL"
+          echo "Direct APK download: $URL"
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.app }}-build-log
+          path: logs/*-build.log
+          if-no-files-found: ignore
+          retention-days: 14

@@ -1,0 +1,10 @@
+{
+  "slug": "photocraft",
+  "display_name": "PhotoCraft",
+  "description": "Image editing application (Photoshop-style use case)",
+  "upstream_repository": "https://github.com/storytold/photocraft",
+  "application_id": "com.artcraft.photocraft",
+  "release_tag": "photocraft-latest",
+  "release_asset_name": "PhotoCraft.apk",
+  "adapter": "builder-provided PhotoCraft Android adapter"
+}

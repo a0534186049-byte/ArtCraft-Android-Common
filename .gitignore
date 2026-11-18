@@ -1,0 +1,17 @@
+build/
+output/
+logs/
+release/
+target/
+.gradle/
+.cache/
+
+# Signing material must never be committed
+keys/
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.b64
+*.secret
+*keystore-password*
