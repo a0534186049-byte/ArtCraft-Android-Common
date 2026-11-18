@@ -6,5 +6,7 @@
   "application_id": "com.artcraft.gridcraft",
   "release_tag": "gridcraft-latest",
   "release_asset_name": "GridCraft.apk",
-  "adapter": "generated Android launcher"
+  "adapter": "generated Android launcher",
+  "android_source_repository": "shlomoappdev-netizen/gridcraft",
+  "android_source_commit": "ba06ef38575a1725a78e0d9099161f5c65db3646"
 }
