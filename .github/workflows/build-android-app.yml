@@ -8,9 +8,14 @@ on:
         required: true
         type: string
       source_version:
-        description: Upstream source selector
+        description: Upstream source selector when no pinned source commit is configured
         required: false
         default: stable
+        type: string
+      build_mode:
+        description: Debug creates a test APK; release requires the permanent app signing key and publishes the fixed Release asset
+        required: false
+        default: debug
         type: string
       builder_ref:
         description: Immutable ArtCraft Android Builder git commit or tag
@@ -19,9 +24,9 @@ on:
         type: string
     secrets:
       ARTCRAFT_SIGNING_KEYSTORE_BASE64:
-        required: true
+        required: false
       ARTCRAFT_SIGNING_PASSWORD:
-        required: true
+        required: false
       ARTCRAFT_EXPECTED_CERT_SHA256:
         required: false
 
@@ -34,7 +39,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build and publish ${{ inputs.app }}
+    name: Build ${{ inputs.app }} (${{ inputs.build_mode }})
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
@@ -67,6 +72,57 @@ jobs:
           ref: ${{ inputs.builder_ref }}
           path: builder
           persist-credentials: false
+
+      - name: Check out the app repository for its Android-only patches
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: app-project
+          persist-credentials: false
+
+      - name: Check out an app-specific immutable source commit when configured
+        env:
+          APP: ${{ steps.profile.outputs.app }}
+          SOURCE_REPOSITORY: ${{ steps.profile.outputs.android_source_repository }}
+          SOURCE_COMMIT: ${{ steps.profile.outputs.android_source_commit }}
+          UPSTREAM_REPOSITORY: ${{ steps.profile.outputs.upstream_repository }}
+        run: |
+          set -Eeuo pipefail
+          if [[ -z "$SOURCE_COMMIT" ]]; then
+            echo "No app-specific source pin; the builder will resolve the selected upstream stable/main source."
+            exit 0
+          fi
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Invalid pinned source SHA."; exit 1; }
+          [[ "$SOURCE_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || {
+            echo "::error::Invalid pinned source repository."
+            exit 1
+          }
+          DEST="$GITHUB_WORKSPACE/builder/source/$APP"
+          mkdir -p "$GITHUB_WORKSPACE/builder/source"
+          git clone --filter=blob:none --no-checkout "https://github.com/$SOURCE_REPOSITORY.git" "$DEST"
+          git -C "$DEST" fetch --depth=1 origin "$SOURCE_COMMIT"
+          git -C "$DEST" checkout --detach FETCH_HEAD
+          ACTUAL="$(git -C "$DEST" rev-parse HEAD)"
+          [[ "$ACTUAL" == "$SOURCE_COMMIT" ]] || {
+            echo "::error::Pinned source SHA mismatch: expected $SOURCE_COMMIT, got $ACTUAL."
+            exit 1
+          }
+          # The builder verifies the source checkout against the canonical upstream origin.
+          git -C "$DEST" remote set-url origin "$UPSTREAM_REPOSITORY.git"
+          echo "Checked out immutable app source $SOURCE_REPOSITORY@$SOURCE_COMMIT."
+
+      - name: Apply app-specific Android port patches
+        env:
+          APP: ${{ steps.profile.outputs.app }}
+        run: |
+          set -Eeuo pipefail
+          PATCH_SCRIPT="app-project/scripts/prepare-${APP}-android.py"
+          if [[ -f "$PATCH_SCRIPT" ]]; then
+            python3 "$PATCH_SCRIPT" "$GITHUB_WORKSPACE/builder/source/$APP"
+          else
+            echo "No app-specific Android port patch script for $APP."
+          fi
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -148,13 +204,14 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Restore this app's permanent signing key
+        if: inputs.build_mode == 'release'
         env:
           KEYSTORE_B64: ${{ secrets.ARTCRAFT_SIGNING_KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD_INPUT: ${{ secrets.ARTCRAFT_SIGNING_PASSWORD }}
         run: |
           set -Eeuo pipefail
           [[ -n "$KEYSTORE_B64" && -n "$KEYSTORE_PASSWORD_INPUT" ]] || {
-            echo "::error::The app repository must define its signing-key Secrets."
+            echo "::error::Release builds require ARTCRAFT_SIGNING_KEYSTORE_BASE64 and ARTCRAFT_SIGNING_PASSWORD in the app repository."
             exit 1
           }
           PASSWORD="$(printf '%s' "$KEYSTORE_PASSWORD_INPUT" | tr -d '\r\n')"
@@ -166,24 +223,39 @@ jobs:
           keytool -list -keystore builder/keys/artcraft-builder.jks -storepass "$PASSWORD" -alias artcraftbuilder >/dev/null
           echo "Persistent app signing key restored."
 
-      - name: Build the Android APK
+      - name: Validate build mode and build the Android APK
         env:
           APP: ${{ steps.profile.outputs.app }}
           DISPLAY_NAME: ${{ steps.profile.outputs.display_name }}
           APPLICATION_ID: ${{ steps.profile.outputs.application_id }}
           SOURCE_VERSION: ${{ inputs.source_version }}
+          SOURCE_COMMIT: ${{ steps.profile.outputs.android_source_commit }}
+          BUILD_MODE: ${{ inputs.build_mode }}
         run: |
           set -Eeuo pipefail
-          case "$SOURCE_VERSION" in
-            stable) SOURCE_FLAG="-stable" ;;
-            main) SOURCE_FLAG="-main" ;;
-            *) echo "::error::source_version must be 'stable' or 'main'."; exit 2 ;;
-          esac
+          [[ "$BUILD_MODE" == "debug" || "$BUILD_MODE" == "release" ]] || {
+            echo "::error::build_mode must be debug or release."
+            exit 2
+          }
           mkdir -p "$GITHUB_WORKSPACE/logs"
           cd "$GITHUB_WORKSPACE/builder"
           set -o pipefail
-          bash build.sh "-$APP" "$SOURCE_FLAG" "-appname=$DISPLAY_NAME" "-packagename=$APPLICATION_ID" 2>&1 |
-            tee "$GITHUB_WORKSPACE/logs/$APP-build.log"
+          if [[ -n "$SOURCE_COMMIT" ]]; then
+            SOURCE_FLAG="-noupdate"
+          else
+            case "$SOURCE_VERSION" in
+              stable) SOURCE_FLAG="-stable" ;;
+              main) SOURCE_FLAG="-main" ;;
+              *) echo "::error::source_version must be stable or main."; exit 2 ;;
+            esac
+          fi
+          if [[ "$BUILD_MODE" == "release" ]]; then
+            bash build.sh "-$APP" "$SOURCE_FLAG" "-appname=$DISPLAY_NAME" "-packagename=$APPLICATION_ID" 2>&1 |
+              tee "$GITHUB_WORKSPACE/logs/$APP-build.log"
+          else
+            bash build-debug.sh "-$APP" "$SOURCE_FLAG" "-appname=$DISPLAY_NAME" "-packagename=$APPLICATION_ID" 2>&1 |
+              tee "$GITHUB_WORKSPACE/logs/$APP-build.log"
+          fi
 
       - name: Verify APK package, signature and integrity
         id: verify
@@ -191,35 +263,41 @@ jobs:
           APP: ${{ steps.profile.outputs.app }}
           APPLICATION_ID: ${{ steps.profile.outputs.application_id }}
           ASSET_NAME: ${{ steps.profile.outputs.release_asset_name }}
+          BUILD_MODE: ${{ inputs.build_mode }}
           EXPECTED_CERT: ${{ secrets.ARTCRAFT_EXPECTED_CERT_SHA256 }}
         run: |
           set -Eeuo pipefail
           shopt -s nullglob
           APKS=( "$GITHUB_WORKSPACE"/builder/output/"$APP"-*.apk )
           if [[ ${#APKS[@]} -ne 1 ]]; then
-            echo "::error::Expected exactly one release APK for $APP; found ${#APKS[@]}."
+            echo "::error::Expected exactly one $BUILD_MODE APK for $APP; found ${#APKS[@]}."
             printf '%s\n' "${APKS[@]}"
             exit 1
+          fi
+          if [[ "$BUILD_MODE" == "debug" ]]; then
+            ASSET_NAME="${ASSET_NAME%.apk}-debug.apk"
           fi
           mkdir -p "$GITHUB_WORKSPACE/release"
           cp -- "${APKS[0]}" "$GITHUB_WORKSPACE/release/$ASSET_NAME"
           bash common/scripts/verify-apk.sh "$GITHUB_WORKSPACE/release/$ASSET_NAME" "$APPLICATION_ID" "$EXPECTED_CERT"
           echo "apk_path=$GITHUB_WORKSPACE/release/$ASSET_NAME" >> "$GITHUB_OUTPUT"
+          echo "asset_name=$ASSET_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Upload APK backup Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.profile.outputs.app }}-apk-backup
+          name: ${{ steps.profile.outputs.app }}-${{ inputs.build_mode }}-apk-backup
           path: ${{ steps.verify.outputs.apk_path }}
           if-no-files-found: error
           retention-days: 14
 
       - name: Create or update the fixed app Release
+        if: inputs.build_mode == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.profile.outputs.release_tag }}
           DISPLAY_NAME: ${{ steps.profile.outputs.display_name }}
-          ASSET_NAME: ${{ steps.profile.outputs.release_asset_name }}
+          ASSET_NAME: ${{ steps.verify.outputs.asset_name }}
         run: |
           set -Eeuo pipefail
           ASSET="$GITHUB_WORKSPACE/release/$ASSET_NAME"
@@ -234,10 +312,11 @@ jobs:
           fi
 
       - name: Verify that the APK is present in Release Assets
+        if: inputs.build_mode == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.profile.outputs.release_tag }}
-          ASSET_NAME: ${{ steps.profile.outputs.release_asset_name }}
+          ASSET_NAME: ${{ steps.verify.outputs.asset_name }}
         run: |
           set -Eeuo pipefail
           RESPONSE="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG")"
