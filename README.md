@@ -85,4 +85,4 @@ The default builder revision is recorded in `versions/artcraft-android-builder.r
 - WordCraft remains an independent, working repository and is not modified by this setup.
 - Upstream source repositories remain the source of truth for the actual application code.
 
-See [Architecture](docs/ARCHITECTURE.md), [Signing and Releases](docs/RELEASES-AND-SIGNING.md), and [App Profiles](docs/APP-REPOSITORIES.md).
+See [Architecture](docs/ARCHITECTURE.md), [Signing and Releases](docs/RELEASES-AND-SIGNING.md), [Build Hardening](docs/BUILD-HARDENING.md), and [App Profiles](docs/APP-REPOSITORIES.md).
