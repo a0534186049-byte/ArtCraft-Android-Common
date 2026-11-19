@@ -185,6 +185,9 @@ jobs:
           set -Eeuo pipefail
           rustc --version
           cargo --version
+          # Normalize formatting in this temporary, patched source checkout first, then
+          # verify it is clean before compiling. This does not modify the app repository.
+          cargo fmt --all
           cargo fmt --all -- --check
           cargo test -p gridcraft-engine --test it a_pathless_imported_workbook_does_not_follow_interface_direction
           cargo test -p gridcraft-engine --test it direction_sync_waits_for_an_open_undo_group_and_stays_clean_after_rollback
