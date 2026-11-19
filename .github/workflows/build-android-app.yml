@@ -142,10 +142,17 @@ jobs:
           PATCH_SCRIPT="app-project/scripts/prepare-${APP}-android.py"
           if [[ -f "$PATCH_SCRIPT" ]]; then
             SOURCE_DIR="$GITHUB_WORKSPACE/builder/source/$APP"
-            python3 "$PATCH_SCRIPT" "$SOURCE_DIR"
-            # All shared-builder patchers must be safe to run repeatedly. A second pass proves
-            # the first pass left the source in a stable, fully-patched state.
-            python3 "$PATCH_SCRIPT" "$SOURCE_DIR"
+            if [[ "$APP" == "gridcraft" ]]; then
+              # GridCraft alone extends the pinned Android launcher templates and egui-winit IME
+              # bridge. Do not expose the shared builder tree to other app patchers.
+              python3 "$PATCH_SCRIPT" "$SOURCE_DIR" "$GITHUB_WORKSPACE/builder"
+              # Prove both source and builder patches are idempotent before Android compilation.
+              python3 "$PATCH_SCRIPT" "$SOURCE_DIR" "$GITHUB_WORKSPACE/builder"
+            else
+              python3 "$PATCH_SCRIPT" "$SOURCE_DIR"
+              # All shared-builder patchers must be safe to run repeatedly.
+              python3 "$PATCH_SCRIPT" "$SOURCE_DIR"
+            fi
             echo "App-specific patcher passed its idempotence check."
           else
             echo "No app-specific Android port patch script for $APP."
