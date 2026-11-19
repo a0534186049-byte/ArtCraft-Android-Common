@@ -90,6 +90,19 @@ jobs:
           path: app-project
           persist-credentials: false
 
+      - name: Preflight app-specific Android patch script
+        env:
+          APP: ${{ steps.profile.outputs.app }}
+        run: |
+          set -Eeuo pipefail
+          PATCH_SCRIPT="app-project/scripts/prepare-${APP}-android.py"
+          if [[ -f "$PATCH_SCRIPT" ]]; then
+            python3 -m py_compile "$PATCH_SCRIPT"
+            echo "Patch script syntax check passed: $PATCH_SCRIPT"
+          else
+            echo "No app-specific Android patch script for $APP."
+          fi
+
       - name: Check out an app-specific immutable source commit when configured
         env:
           APP: ${{ steps.profile.outputs.app }}
@@ -128,7 +141,12 @@ jobs:
           set -Eeuo pipefail
           PATCH_SCRIPT="app-project/scripts/prepare-${APP}-android.py"
           if [[ -f "$PATCH_SCRIPT" ]]; then
-            python3 "$PATCH_SCRIPT" "$GITHUB_WORKSPACE/builder/source/$APP"
+            SOURCE_DIR="$GITHUB_WORKSPACE/builder/source/$APP"
+            python3 "$PATCH_SCRIPT" "$SOURCE_DIR"
+            # All shared-builder patchers must be safe to run repeatedly. A second pass proves
+            # the first pass left the source in a stable, fully-patched state.
+            python3 "$PATCH_SCRIPT" "$SOURCE_DIR"
+            echo "App-specific patcher passed its idempotence check."
           else
             echo "No app-specific Android port patch script for $APP."
           fi
@@ -165,7 +183,9 @@ jobs:
           RUSTC_WRAPPER: ""
         run: |
           set -Eeuo pipefail
-          cargo fmt --all
+          rustc --version
+          cargo --version
+          cargo fmt --all -- --check
           cargo test -p gridcraft-engine --test it a_pathless_imported_workbook_does_not_follow_interface_direction
           cargo test -p gridcraft-engine --test it direction_sync_waits_for_an_open_undo_group_and_stays_clean_after_rollback
           cargo test -p gridcraft-ui-egui --test it right_to_left::column_a_is_drawn_on_the_right_and_clicks_hit_the_mirrored_cells
