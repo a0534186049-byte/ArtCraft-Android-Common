@@ -242,7 +242,13 @@ jobs:
           cargo test -p photocraft-ui-egui hebrew_and_urdu_mirror_the_shell_and_draw_their_letters
           mkdir -p "$GITHUB_WORKSPACE/logs"
           cargo xtask i18n-report 2>&1 | tee "$GITHUB_WORKSPACE/logs/photocraft-hebrew-i18n-report.txt"
-          grep -Eq '^he: (none missing|[0-9]+ missing)        uses: mozilla-actions/sccache-action@v0.0.11
+          grep -Eq '^he: (none missing|[0-9]+ missing)$' "$GITHUB_WORKSPACE/logs/photocraft-hebrew-i18n-report.txt" || {
+            echo "::error::The PhotoCraft Hebrew catalog report did not include a coverage result."
+            exit 1
+          }
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
         with:
           version: "v0.9.0"
 
