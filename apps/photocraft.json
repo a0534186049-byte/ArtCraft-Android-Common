@@ -6,5 +6,7 @@
   "application_id": "com.artcraft.photocraft",
   "release_tag": "photocraft-latest",
   "release_asset_name": "PhotoCraft.apk",
-  "adapter": "builder-provided PhotoCraft Android adapter"
+  "adapter": "builder-provided PhotoCraft Android adapter",
+  "android_source_repository": "storytold/photocraft",
+  "android_source_commit": "75edf42c64dbd13b8d8e193d04fecb7f796b1e6e"
 }
