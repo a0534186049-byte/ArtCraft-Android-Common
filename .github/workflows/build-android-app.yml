@@ -134,6 +134,32 @@ jobs:
           git -C "$DEST" remote set-url origin "$UPSTREAM_REPOSITORY.git"
           echo "Checked out immutable app source $SOURCE_REPOSITORY@$SOURCE_COMMIT."
 
+      - name: Check out PhotoCraft's pinned Hebrew catalogs
+        if: inputs.app == 'photocraft'
+        working-directory: builder/source/photocraft
+        run: |
+          set -Eeuo pipefail
+          CATALOG_COMMIT="$(tr -d '[:space:]' < craft-i18n.rev)"
+          [[ "$CATALOG_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::PhotoCraft craft-i18n.rev is not a full commit SHA."
+            exit 1
+          }
+          git clone --filter=blob:none --no-checkout https://github.com/storytold/craft-i18n.git "$GITHUB_WORKSPACE/craft-i18n"
+          git -C "$GITHUB_WORKSPACE/craft-i18n" fetch --depth=1 origin "$CATALOG_COMMIT"
+          git -C "$GITHUB_WORKSPACE/craft-i18n" checkout --detach FETCH_HEAD
+          ACTUAL="$(git -C "$GITHUB_WORKSPACE/craft-i18n" rev-parse HEAD)"
+          [[ "$ACTUAL" == "$CATALOG_COMMIT" ]] || {
+            echo "::error::PhotoCraft translation catalog SHA mismatch."
+            exit 1
+          }
+          test -s "$GITHUB_WORKSPACE/craft-i18n/locales/he/common.tsv"
+          test -s "$GITHUB_WORKSPACE/craft-i18n/locales/he/photocraft.tsv"
+          {
+            echo "CRAFT_I18N_DIR=$GITHUB_WORKSPACE/craft-i18n"
+            echo "CRAFT_I18N_REQUIRED=1"
+          } >> "$GITHUB_ENV"
+          echo "Pinned PhotoCraft Hebrew catalogs: $CATALOG_COMMIT"
+
       - name: Apply app-specific Android port patches
         env:
           APP: ${{ steps.profile.outputs.app }}
@@ -142,9 +168,9 @@ jobs:
           PATCH_SCRIPT="app-project/scripts/prepare-${APP}-android.py"
           if [[ -f "$PATCH_SCRIPT" ]]; then
             SOURCE_DIR="$GITHUB_WORKSPACE/builder/source/$APP"
-            if [[ "$APP" == "gridcraft" ]]; then
-              # GridCraft alone extends the pinned Android launcher templates and egui-winit IME
-              # bridge. Do not expose the shared builder tree to other app patchers.
+            if [[ "$APP" == "gridcraft" || "$APP" == "photocraft" ]]; then
+              # GridCraft extends its launcher/IME bridge; PhotoCraft localizes the Android-only
+              # text action bar. Each patcher touches only its app's builder copy.
               python3 "$PATCH_SCRIPT" "$SOURCE_DIR" "$GITHUB_WORKSPACE/builder"
               # Prove both source and builder patches are idempotent before Android compilation.
               python3 "$PATCH_SCRIPT" "$SOURCE_DIR" "$GITHUB_WORKSPACE/builder"
@@ -202,6 +228,236 @@ jobs:
           cargo test -p gridcraft-ui-egui --test it right_to_left::left_and_right_arrows_follow_the_screen
           mkdir -p "$GITHUB_WORKSPACE/logs"
           cargo xtask i18n-report 2>&1 | tee "$GITHUB_WORKSPACE/logs/gridcraft-hebrew-i18n-report.txt"
+
+      - name: Run PhotoCraft Hebrew and RTL checks
+        if: inputs.app == 'photocraft'
+        working-directory: builder/source/photocraft
+        env:
+          RUSTC_WRAPPER: ""
+        run: |
+          set -Eeuo pipefail
+          test -s "$CRAFT_I18N_DIR/locales/he/photocraft.tsv"
+          test -s "$CRAFT_I18N_DIR/locales/he/common.tsv"
+          cargo fmt --all -- --check
+          cargo test -p photocraft-ui-egui hebrew_and_urdu_mirror_the_shell_and_draw_their_letters
+          mkdir -p "$GITHUB_WORKSPACE/logs"
+          cargo xtask i18n-report 2>&1 | tee "$GITHUB_WORKSPACE/logs/photocraft-hebrew-i18n-report.txt"
+          grep -Eq '^he: (none missing|[0-9]+ missing)        uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: "v0.9.0"
+
+      - name: Cache Rust compiler artifacts
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/sccache
+          key: sccache-${{ runner.os }}-${{ inputs.app }}-${{ inputs.builder_ref }}-${{ github.sha }}
+          restore-keys: |
+            sccache-${{ runner.os }}-${{ inputs.app }}-${{ inputs.builder_ref }}-
+            sccache-${{ runner.os }}-${{ inputs.app }}-
+
+      - name: Cache Cargo and Gradle dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: artcraft-deps-${{ runner.os }}-${{ inputs.app }}-${{ inputs.builder_ref }}
+          restore-keys: |
+            artcraft-deps-${{ runner.os }}-${{ inputs.app }}-
+
+      - name: Install cargo-ndk
+        run: |
+          set -Eeuo pipefail
+          if ! command -v cargo-ndk >/dev/null 2>&1; then
+            mkdir -p "$HOME/.cargo/bin"
+            curl -fsSL https://github.com/bbqsrc/cargo-ndk/releases/download/v4.1.2/cargo-ndk-x86_64-unknown-linux-musl-v4.1.2.tgz |
+              tar -xz --strip-components=1 -C "$HOME/.cargo/bin"
+            chmod +x "$HOME/.cargo/bin/cargo-ndk"*
+          fi
+          cargo ndk -V
+
+      - name: Configure Android SDK and NDK
+        run: |
+          set -Eeuo pipefail
+          [[ -n "$ANDROID_HOME" && -d "$ANDROID_HOME" ]] || { echo "::error::Android SDK is not configured on this runner."; exit 1; }
+          if [[ -d "$ANDROID_HOME/ndk/27.2.12479018" ]]; then
+            NDK="$ANDROID_HOME/ndk/27.2.12479018"
+          else
+            NDK="$(find "$ANDROID_HOME/ndk" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -n 1)"
+          fi
+          [[ -n "$NDK" && -d "$NDK" ]] || { echo "::error::Android NDK was not found."; exit 1; }
+          {
+            echo "ANDROID_NDK_HOME=$NDK"
+            echo "NDK_HOME=$NDK"
+            echo "ARTCRAFT_BUILD_TOOLS_VERSION=35.0.0"
+          } >> "$GITHUB_ENV"
+
+      - name: Restore this app's permanent signing key
+        if: inputs.build_mode == 'release'
+        env:
+          KEYSTORE_B64: ${{ secrets.ARTCRAFT_SIGNING_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD_INPUT: ${{ secrets.ARTCRAFT_SIGNING_PASSWORD }}
+        run: |
+          set -Eeuo pipefail
+          [[ -n "$KEYSTORE_B64" && -n "$KEYSTORE_PASSWORD_INPUT" ]] || {
+            echo "::error::Release builds require ARTCRAFT_SIGNING_KEYSTORE_BASE64 and ARTCRAFT_SIGNING_PASSWORD in the app repository."
+            exit 1
+          }
+          PASSWORD="$(printf '%s' "$KEYSTORE_PASSWORD_INPUT" | tr -d '\r\n')"
+          mkdir -p builder/keys
+          chmod 700 builder/keys
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > builder/keys/artcraft-builder.jks
+          printf '%s' "$PASSWORD" > builder/keys/.keystore-password
+          chmod 600 builder/keys/artcraft-builder.jks builder/keys/.keystore-password
+          keytool -list -keystore builder/keys/artcraft-builder.jks -storepass "$PASSWORD" -alias artcraftbuilder >/dev/null
+          echo "Persistent app signing key restored."
+
+      - name: Validate build mode and build the Android APK
+        env:
+          APP: ${{ steps.profile.outputs.app }}
+          DISPLAY_NAME: ${{ steps.profile.outputs.display_name }}
+          APPLICATION_ID: ${{ steps.profile.outputs.application_id }}
+          SOURCE_VERSION: ${{ inputs.source_version }}
+          SOURCE_COMMIT: ${{ steps.profile.outputs.android_source_commit }}
+          BUILD_MODE: ${{ inputs.build_mode }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$BUILD_MODE" == "debug" || "$BUILD_MODE" == "release" ]] || {
+            echo "::error::build_mode must be debug or release."
+            exit 2
+          }
+          mkdir -p "$GITHUB_WORKSPACE/logs"
+          cd "$GITHUB_WORKSPACE/builder"
+          set -o pipefail
+          if [[ -n "$SOURCE_COMMIT" ]]; then
+            SOURCE_FLAG="-noupdate"
+          else
+            case "$SOURCE_VERSION" in
+              stable) SOURCE_FLAG="-stable" ;;
+              main) SOURCE_FLAG="-main" ;;
+              *) echo "::error::source_version must be stable or main."; exit 2 ;;
+            esac
+          fi
+          if [[ "$BUILD_MODE" == "release" ]]; then
+            bash build.sh "-$APP" "$SOURCE_FLAG" "-appname=$DISPLAY_NAME" "-packagename=$APPLICATION_ID" 2>&1 |
+              tee "$GITHUB_WORKSPACE/logs/$APP-build.log"
+          else
+            bash build-debug.sh "-$APP" "$SOURCE_FLAG" "-appname=$DISPLAY_NAME" "-packagename=$APPLICATION_ID" 2>&1 |
+              tee "$GITHUB_WORKSPACE/logs/$APP-build.log"
+          fi
+
+      - name: Verify APK package, signature and integrity
+        id: verify
+        env:
+          APP: ${{ steps.profile.outputs.app }}
+          APPLICATION_ID: ${{ steps.profile.outputs.application_id }}
+          ASSET_NAME: ${{ steps.profile.outputs.release_asset_name }}
+          BUILD_MODE: ${{ inputs.build_mode }}
+          EXPECTED_CERT: ${{ secrets.ARTCRAFT_EXPECTED_CERT_SHA256 }}
+        run: |
+          set -Eeuo pipefail
+          shopt -s nullglob
+          APKS=( "$GITHUB_WORKSPACE"/builder/output/"$APP"-*.apk )
+          if [[ ${#APKS[@]} -ne 1 ]]; then
+            echo "::error::Expected exactly one $BUILD_MODE APK for $APP; found ${#APKS[@]}."
+            printf '%s\n' "${APKS[@]}"
+            exit 1
+          fi
+          if [[ "$BUILD_MODE" == "debug" ]]; then
+            ASSET_NAME="${ASSET_NAME%.apk}-debug.apk"
+          fi
+          mkdir -p "$GITHUB_WORKSPACE/release"
+          cp -- "${APKS[0]}" "$GITHUB_WORKSPACE/release/$ASSET_NAME"
+          bash common/scripts/verify-apk.sh "$GITHUB_WORKSPACE/release/$ASSET_NAME" "$APPLICATION_ID" "$EXPECTED_CERT"
+          echo "apk_path=$GITHUB_WORKSPACE/release/$ASSET_NAME" >> "$GITHUB_OUTPUT"
+          echo "asset_name=$ASSET_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Verify PhotoCraft Hebrew catalog is embedded in the APK
+        if: inputs.app == 'photocraft'
+        env:
+          APK_PATH: ${{ steps.verify.outputs.apk_path }}
+        run: |
+          set -Eeuo pipefail
+          python3 - "$APK_PATH" <<'PY'
+          import sys, zipfile
+          apk = sys.argv[1]
+          sentinel = "אודות PhotoCraft".encode("utf-8")
+          with zipfile.ZipFile(apk) as archive:
+              libraries = [name for name in archive.namelist()
+                           if name.endswith("/libphotocraft_android.so")]
+              if len(libraries) != 1:
+                  raise SystemExit(f"Expected one PhotoCraft native library, found {len(libraries)}")
+              binary = archive.read(libraries[0])
+              if sentinel not in binary:
+                  raise SystemExit("Hebrew catalog sentinel was not found in the packaged PhotoCraft native library")
+          print("Verified: the packaged PhotoCraft native library contains its embedded Hebrew catalog.")
+          PY
+
+      - name: Upload APK backup Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.profile.outputs.app }}-${{ inputs.build_mode }}-apk-backup
+          path: |
+            ${{ steps.verify.outputs.apk_path }}
+            logs/*-i18n-report.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Create or update the fixed app Release
+        if: inputs.build_mode == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.profile.outputs.release_tag }}
+          DISPLAY_NAME: ${{ steps.profile.outputs.display_name }}
+          ASSET_NAME: ${{ steps.verify.outputs.asset_name }}
+        run: |
+          set -Eeuo pipefail
+          ASSET="$GITHUB_WORKSPACE/release/$ASSET_NAME"
+          [[ -s "$ASSET" ]] || { echo "::error::Verified APK asset is missing."; exit 1; }
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$ASSET" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$RELEASE_TAG" "$ASSET" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$DISPLAY_NAME - latest Android APK" \
+              --notes "Latest verified Android APK. Subsequent successful builds replace this asset in the same Release."
+          fi
+
+      - name: Verify that the APK is present in Release Assets
+        if: inputs.build_mode == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.profile.outputs.release_tag }}
+          ASSET_NAME: ${{ steps.verify.outputs.asset_name }}
+        run: |
+          set -Eeuo pipefail
+          RESPONSE="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG")"
+          URL="$(printf '%s' "$RESPONSE" | jq -r --arg name "$ASSET_NAME" '.assets[] | select(.name == $name) | .browser_download_url' | head -n 1)"
+          REMOTE_SIZE="$(printf '%s' "$RESPONSE" | jq -r --arg name "$ASSET_NAME" '.assets[] | select(.name == $name) | .size' | head -n 1)"
+          LOCAL_SIZE="$(stat -c%s "$GITHUB_WORKSPACE/release/$ASSET_NAME")"
+          [[ -n "$URL" && "$URL" != "null" ]] || { echo "::error::APK asset not found in Release Assets."; exit 1; }
+          [[ "$REMOTE_SIZE" == "$LOCAL_SIZE" ]] || {
+            echo "::error::Release APK size mismatch (local=$LOCAL_SIZE, remote=$REMOTE_SIZE)."
+            exit 1
+          }
+          echo "Verified published APK asset: $URL"
+          echo "Direct APK download: $URL"
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.app }}-build-log
+          path: logs/*-build.log
+          if-no-files-found: ignore
+          retention-days: 14
+ "$GITHUB_WORKSPACE/logs/photocraft-hebrew-i18n-report.txt" || {
+            echo "::error::The PhotoCraft Hebrew catalog report did not include a coverage result."
+            exit 1
+          }
 
       - name: Set up sccache
         uses: mozilla-actions/sccache-action@v0.0.11
